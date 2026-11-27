@@ -1,0 +1,70 @@
+name: Daily digest
+
+on:
+  schedule:
+    - cron: "17 12 * * *"   # morning edition (always)
+    - cron: "41 17 * * *"   # midday edition (random, ~50%)
+    - cron: "53 21 * * *"   # evening edition (random, ~50%)
+  workflow_dispatch:
+    inputs:
+      edition:
+        description: "morning | midday | evening"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: digest
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decide whether this run publishes
+        id: gate
+        run: |
+          case "${{ github.event.schedule }}" in
+            "17 12 * * *") echo "edition=morning" >> "$GITHUB_OUTPUT" ;;
+            "41 17 * * *") echo "edition=midday" >> "$GITHUB_OUTPUT" ;;
+            "53 21 * * *") echo "edition=evening" >> "$GITHUB_OUTPUT" ;;
+          esac
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event.schedule }}" = "17 12 * * *" ]; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          elif [ $((RANDOM % 2)) -eq 0 ]; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=false" >> "$GITHUB_OUTPUT"; echo "Skipping this edition today"
+          fi
+
+      - name: Random delay (spreads commit times)
+        if: steps.gate.outputs.go == 'true' && github.event_name == 'schedule'
+        run: sleep $((RANDOM % 2700))
+
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.go == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Build edition
+        if: steps.gate.outputs.go == 'true'
+        env:
+          EDITION: ${{ github.event.inputs.edition || steps.gate.outputs.edition }}
+        run: python scripts/digest.py
+
+      - name: Commit
+        if: steps.gate.outputs.go == 'true'
+        run: |
+          git config user.name "Prakhar Jain"
+          if [ -z "${{ vars.COMMIT_EMAIL }}" ]; then echo "::error::Add a repository variable COMMIT_EMAIL (Settings > Secrets and variables > Actions > Variables)"; exit 1; fi
+          git config user.email "${{ vars.COMMIT_EMAIL }}"
+          git add -A
+          if git diff --cached --quiet; then echo "No changes"; exit 0; fi
+          git commit -m "digest: $(date -u +%F) $(date -u +%H:%M) UTC edition"
+          git pull --rebase
+          git push
